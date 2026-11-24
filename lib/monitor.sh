@@ -189,6 +189,10 @@ monitor_status() {
   if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
     echo -e "${GRN}Monitor running (PID $(cat "$pidfile"))${NC}"
     tail -5 /var/log/unleash-monitor.log 2>/dev/null || echo "  (no log entries yet)"
+  elif command -v launchctl &>/dev/null && launchctl list com.unleash.monitor &>/dev/null; then
+    echo -e "${YEL}Monitor LaunchDaemon loaded, but PID file not active${NC}"
+    launchctl list com.unleash.monitor 2>/dev/null | grep -E "PID|LastExitStatus" || true
+    [ -s /var/log/unleash-monitor.err ] && tail -5 /var/log/unleash-monitor.err 2>/dev/null || true
   else
     echo -e "${YEL}Monitor not running${NC}"
   fi

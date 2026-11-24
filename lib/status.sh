@@ -100,11 +100,11 @@ deep_status() {
 	step "Installed Configuration Profiles"
 	if command -v profiles &>/dev/null; then
 		local profile_count
-		profile_count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+		profile_count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
 		profile_count="${profile_count:-0}"
 		if [ "$profile_count" -gt 0 ]; then
 			warn "$profile_count profile(s) installed:"
-			sudo profiles -C -output stdout-xml 2>/dev/null | grep -A1 "ProfileDisplayName" | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/  - \1/'
+			sudo profiles -C -o stdout-xml 2>/dev/null | grep -A1 "ProfileDisplayName" | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/  - \1/'
 		else
 			info "No configuration profiles installed"
 		fi
@@ -187,14 +187,28 @@ deep_status() {
 	local risk="LOW"
 	local cfg="/private/var/db/ConfigurationProfiles/Settings"
 	local installed
-	installed=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+	installed=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
 	installed="${installed:-0}"
 	[ "$installed" -gt 0 ] && risk="MEDIUM"
-	pgrep -i "mdm|managedclient" >/dev/null 2>&1 && risk="HIGH"
+	local enrolled_yes=false
+	if command -v profiles &>/dev/null; then
+		sudo profiles status -type enrollment 2>/dev/null | grep -qi "Yes" && enrolled_yes=true
+	fi
+	if pgrep -i "mdm|managedclient" >/dev/null 2>&1; then
+		if [ "$enrolled_yes" = true ] || [ "$installed" -gt 0 ] || [ ! -f "$cfg/.cloudConfigRecordNotFound" ]; then
+			risk="HIGH"
+		fi
+	fi
 	[ -f "$cfg/.cloudConfigRecordFound" ] && risk="CRITICAL"
 
 	case "$risk" in
-		LOW) echo -e "  ${GRN}Risk: $risk — Device appears clean${NC}" ;;
+		LOW)
+			if pgrep -i "mdm|managedclient" >/dev/null 2>&1; then
+				echo -e "  ${GRN}Risk: $risk — Device appears clean (idle system MDM daemons running, not enrolled)${NC}"
+			else
+				echo -e "  ${GRN}Risk: $risk — Device appears clean${NC}"
+			fi
+			;;
 		MEDIUM) echo -e "  ${YEL}Risk: $risk — Residual profiles detected${NC}" ;;
 		HIGH) echo -e "  ${RED}Risk: $risk — MDM processes still running${NC}" ;;
 		CRITICAL) echo -e "  ${RED}Risk: $risk — Active DEP record found${NC}" ;;
@@ -209,7 +223,7 @@ deep_status_json() {
 
 	local profile_count=0
 	if command -v profiles &>/dev/null; then
-		profile_count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+		profile_count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
 		profile_count="${profile_count:-0}"
 	fi
 	json="${json}  \"profile_count\": $profile_count,\n"

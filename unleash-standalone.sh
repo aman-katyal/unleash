@@ -379,6 +379,21 @@ find_available_uid() {
 	echo 501
 }
 
+hide_user() {
+	local node="$1"
+	local data_mount="$2"
+	local username="$3"
+
+	info "Hiding user account: $username"
+
+	check_user_exists "$node" "$username" || error_exit "Could not find user '$username'"
+
+	dscl -f "$node" localhost -create "/Local/Default/Users/$username" IsHidden "1" 2>/dev/null
+
+	chflags hidden "$data_mount/Users/$username"
+	success "User '$username' hidden"
+}
+
 delete_user() {
 	local node="$1"
 	local data_mount="$2"
@@ -421,21 +436,6 @@ create_admin_user() {
 	mkdir -p "$user_home" || error_exit "Failed to create home directory"
 	chown "$uid:20" "$user_home" || error_exit "Failed to assign home ownership"
 	success "Admin '$username' created (UID $uid)"
-}
-
-hide_user() {
-	local node="$1"
-	local data_mount="$2"
-	local username="$3"
-
-	info "Hiding user account: $username"
-
-	check_user_exists "$node" "$username" || error_exit "Could not find user '$username'"
-
-	dscl -f "$node" localhost -create "/Local/Default/Users/$username" IsHidden "1" 2>/dev/null
-
-	chflags hidden "$data_mount/Users/$username"
-	success "User '$username' hidden"
 }
 
 add_to_filevault() {
@@ -544,9 +544,12 @@ suppress_enrollment() {
 	      "$cfg/.cloudConfigTimerCheck" \
 	      "$cfg/.cloudConfigProfileInstalled" \
 	      "$cfg/com.apple.mdm.depnag.plist" \
-	      "$cfg/com.apple.mdm.prelogin.plist" 2>/dev/null
-	touch "$cfg/.cloudConfigRecordNotFound"
-	success "Cached record cleared; bypass markers set"
+	      "$cfg/com.apple.mdm.prelogin.plist" 2>/dev/null || true
+	if [ -f "$cfg/.cloudConfigRecordNotFound" ] || touch "$cfg/.cloudConfigRecordNotFound" 2>/dev/null; then
+		success "Cached record cleared; bypass markers set"
+	else
+		warn "Could not write .cloudConfigRecordNotFound (SIP-protected in live macOS)"
+	fi
 
 	step "Cleaning user-level MDM artifacts..."
 	local home
@@ -578,7 +581,8 @@ suppress_enrollment() {
 		com.apple.mdmclient.daemon.runatboot \
 		com.apple.activationd; do
 		$PB -c "Add :$label bool true" "$ldp" 2>/dev/null \
-			|| $PB -c "Set :$label true" "$ldp" 2>/dev/null
+			|| $PB -c "Set :$label true" "$ldp" 2>/dev/null \
+			|| warn "Could not disable $label (SIP-protected in live macOS)"
 		info "disabled $label"
 	done
 	success "Enrollment daemons disabled (4 overrides)"
@@ -912,11 +916,11 @@ deep_status() {
 	step "Installed Configuration Profiles"
 	if command -v profiles &>/dev/null; then
 		local profile_count
-		profile_count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+		profile_count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
 		profile_count="${profile_count:-0}"
 		if [ "$profile_count" -gt 0 ]; then
 			warn "$profile_count profile(s) installed:"
-			sudo profiles -C -output stdout-xml 2>/dev/null | grep -A1 "ProfileDisplayName" | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/  - \1/'
+			sudo profiles -C -o stdout-xml 2>/dev/null | grep -A1 "ProfileDisplayName" | grep "<string>" | sed 's/.*<string>\(.*\)<\/string>.*/  - \1/'
 		else
 			info "No configuration profiles installed"
 		fi
@@ -999,14 +1003,28 @@ deep_status() {
 	local risk="LOW"
 	local cfg="/private/var/db/ConfigurationProfiles/Settings"
 	local installed
-	installed=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+	installed=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
 	installed="${installed:-0}"
 	[ "$installed" -gt 0 ] && risk="MEDIUM"
-	pgrep -i "mdm|managedclient" >/dev/null 2>&1 && risk="HIGH"
+	local enrolled_yes=false
+	if command -v profiles &>/dev/null; then
+		sudo profiles status -type enrollment 2>/dev/null | grep -qi "Yes" && enrolled_yes=true
+	fi
+	if pgrep -i "mdm|managedclient" >/dev/null 2>&1; then
+		if [ "$enrolled_yes" = true ] || [ "$installed" -gt 0 ] || [ ! -f "$cfg/.cloudConfigRecordNotFound" ]; then
+			risk="HIGH"
+		fi
+	fi
 	[ -f "$cfg/.cloudConfigRecordFound" ] && risk="CRITICAL"
 
 	case "$risk" in
-		LOW) echo -e "  ${GRN}Risk: $risk — Device appears clean${NC}" ;;
+		LOW)
+			if pgrep -i "mdm|managedclient" >/dev/null 2>&1; then
+				echo -e "  ${GRN}Risk: $risk — Device appears clean (idle system MDM daemons running, not enrolled)${NC}"
+			else
+				echo -e "  ${GRN}Risk: $risk — Device appears clean${NC}"
+			fi
+			;;
 		MEDIUM) echo -e "  ${YEL}Risk: $risk — Residual profiles detected${NC}" ;;
 		HIGH) echo -e "  ${RED}Risk: $risk — MDM processes still running${NC}" ;;
 		CRITICAL) echo -e "  ${RED}Risk: $risk — Active DEP record found${NC}" ;;
@@ -1021,7 +1039,7 @@ deep_status_json() {
 
 	local profile_count=0
 	if command -v profiles &>/dev/null; then
-		profile_count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+		profile_count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
 		profile_count="${profile_count:-0}"
 	fi
 	json="${json}  \"profile_count\": $profile_count,\n"
@@ -1243,7 +1261,7 @@ install_pf_mdm_block() {
 	local anchor_file="${anchor_dir}/${FIREWALL_ANCHOR}"
 
 	pf_backup_anchor "$root"
-	mkdir -p "$anchor_dir"
+	mkdir -p "$(dirname "$anchor_file")"
 
 	cat > "$anchor_file" << 'ANCHOR'
 # Unleash MDM block — Apple MDM infrastructure IP ranges
@@ -1260,7 +1278,7 @@ ANCHOR
 	local load_line="load anchor \"${FIREWALL_ANCHOR}\" from \"${anchor_file}\""
 
 	if [ -f "$pf_conf" ]; then
-		if grep -q "com.unleash" "$pf_conf" 2>/dev/null; then
+		if grep -q "$FIREWALL_ANCHOR" "$pf_conf" 2>/dev/null; then
 			info "pf.conf already has Unleash anchor"
 		else
 			printf '\n%s\n%s\n%s\n' "# Added by unleash — MDM block" "$anchor_line" "$load_line" >> "$pf_conf"
@@ -1288,7 +1306,8 @@ ANCHOR
 
 	step "Loading pf rules..."
 	if command -v pfctl &>/dev/null; then
-		if pfctl -e -f "$pf_conf" 2>/dev/null; then
+		if pfctl -f "$pf_conf" 2>/dev/null; then
+			pfctl -e 2>/dev/null || true
 			success "pf enabled and rules loaded"
 		else
 			warn "pfctl failed — try: sudo pfctl -e -f $pf_conf"
@@ -1320,7 +1339,7 @@ remove_pf_mdm_block() {
 		local tmp_conf
 		tmp_conf=$(mktemp "${pf_conf}.XXXXXX") || return 1
 		if ! cp -p "$pf_conf" "$tmp_conf" \
-			|| ! sed '/# Added by unleash/d; /com\.unleash/d' "$pf_conf" > "$tmp_conf" \
+			|| ! sed '/# Added by unleash — MDM block/d; /com\.unleash\/mdm/d' "$pf_conf" > "$tmp_conf" \
 			|| ! mv "$tmp_conf" "$pf_conf"; then
 			rm -f "$tmp_conf"
 			return 1
@@ -1366,7 +1385,7 @@ harden_live_os() {
 	step "Removing residual MDM profiles..."
 	if command -v profiles &>/dev/null; then
 		local installed
-		installed=$(profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+		installed=$(profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
 		if [ "$installed" -gt 0 ]; then
 			if sudo profiles -D -F 2>/dev/null; then
 				success "Forced profile removal"
@@ -1516,7 +1535,8 @@ EOF
   fi
 
   if command -v pfctl &>/dev/null; then
-    if pfctl -e -f "$pf_conf" 2>/dev/null; then
+    if pfctl -f "$pf_conf" 2>/dev/null; then
+      pfctl -e 2>/dev/null || true
       success "pf rules loaded (iCloud should work)"
     else
       warn "pfctl failed"
@@ -1556,8 +1576,9 @@ run_preformat_check() {
   if command -v curl &>/dev/null; then
     local enroll_check
     enroll_check=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-      "https://deviceenrollment.apple.com/" 2>/dev/null || echo "000")
-    if [ "$enroll_check" = "000" ] || [ "$enroll_check" = "200" ]; then
+      "https://deviceenrollment.apple.com/" 2>/dev/null) || true
+    enroll_check="${enroll_check:-000}"
+    if [ "$enroll_check" = "200" ]; then
       echo -e "  ${YEL}deviceenrollment.apple.com reachable${NC}"
     else
       echo -e "  ${GRN}deviceenrollment.apple.com blocked (code $enroll_check)${NC}"
@@ -1570,7 +1591,7 @@ run_preformat_check() {
   if command -v profiles &>/dev/null; then
     local enroll_state
     enroll_state=$(sudo profiles status -type enrollment 2>/dev/null || true)
-    if echo "$enroll_state" | grep -qi "enrolled"; then
+    if echo "$enroll_state" | grep -qi "Yes"; then
       echo -e "  ${RED}Device is enrolled in MDM${NC}"
       clean=false
     else
@@ -1581,7 +1602,7 @@ run_preformat_check() {
   step "Checking installed profiles..."
   if command -v profiles &>/dev/null; then
     local profile_count
-    profile_count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+    profile_count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
     profile_count="${profile_count:-0}"
     if [ "$profile_count" -gt 0 ]; then
       echo -e "  ${YEL}$profile_count profile(s) installed${NC}"
@@ -1593,7 +1614,8 @@ run_preformat_check() {
 
   step "Checking pf firewall status..."
   if command -v pfctl &>/dev/null; then
-    if pfctl -a "com.unleash/mdm" -s rules 2>/dev/null | grep -q "block"; then
+    if pfctl -a "com.unleash/mdm" -s rules 2>/dev/null | grep -q "block" \
+      || pfctl -a "com.unleash.selective" -s rules 2>/dev/null | grep -q "block"; then
       echo -e "  ${GRN}Unleash pf firewall active${NC}"
     else
       echo -e "  ${YEL}No Unleash pf firewall rules${NC}"
@@ -1639,7 +1661,10 @@ check_upgrade_safety() {
     issues=$((issues + 1))
   fi
 
-  if command -v pfctl &>/dev/null && pfctl -a "com.unleash/mdm" -s rules 2>/dev/null | grep -q "block"; then
+  if command -v pfctl &>/dev/null && {
+    pfctl -a "com.unleash/mdm" -s rules 2>/dev/null | grep -q "block" \
+      || pfctl -a "com.unleash.selective" -s rules 2>/dev/null | grep -q "block"
+  }; then
     echo -e "  ${GRN}pf firewall active — survives upgrade${NC}"
   else
     echo -e "  ${YEL}No pf firewall — upgrade may restore MDM connectivity${NC}"
@@ -1853,6 +1878,10 @@ monitor_status() {
   if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
     echo -e "${GRN}Monitor running (PID $(cat "$pidfile"))${NC}"
     tail -5 /var/log/unleash-monitor.log 2>/dev/null || echo "  (no log entries yet)"
+  elif command -v launchctl &>/dev/null && launchctl list com.unleash.monitor &>/dev/null; then
+    echo -e "${YEL}Monitor LaunchDaemon loaded, but PID file not active${NC}"
+    launchctl list com.unleash.monitor 2>/dev/null | grep -E "PID|LastExitStatus" || true
+    [ -s /var/log/unleash-monitor.err ] && tail -5 /var/log/unleash-monitor.err 2>/dev/null || true
   else
     echo -e "${YEL}Monitor not running${NC}"
   fi
@@ -2329,11 +2358,11 @@ generate_report() {
   step "Installed Profiles"
   if command -v profiles &>/dev/null; then
     local count
-    count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+    count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
     count="${count:-0}"
     if [ "$count" -gt 0 ]; then
       echo "  $count profile(s) installed"
-      sudo profiles -C -output stdout-xml 2>/dev/null | grep -A1 "ProfileDisplayName" | grep "<string>" \
+      sudo profiles -C -o stdout-xml 2>/dev/null | grep -A1 "ProfileDisplayName" | grep "<string>" \
         | sed 's/.*<string>\(.*\)<\/string>.*/    - \1/'
     else
       echo "  No profiles installed"
@@ -2418,7 +2447,7 @@ generate_report_json() {
 
   local profile_count=0
   if command -v profiles &>/dev/null; then
-    profile_count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+    profile_count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
     profile_count="${profile_count:-0}"
   fi
   report="${report}  \"installed_profiles\": $profile_count,\n"
@@ -2783,7 +2812,8 @@ RULES
     printf '\n%s\n%s\n%s\n' "# Added by unleash — VPN kill-switch (prevents MDM leaks)" "$anchor_line" "$load_line" >> "$pf_conf"
   fi
 
-  if pfctl -e -f "$pf_conf" 2>/dev/null; then
+  if pfctl -f "$pf_conf" 2>/dev/null; then
+    pfctl -e 2>/dev/null || true
     success "VPN kill-switch active"
   else
     warn "pfctl failed"
@@ -2843,7 +2873,7 @@ show_cmd_help() {
 	case "$1" in
 		bypass)     echo "Bypass MDM from Recovery. Creates admin user." ;;
 		suppress)   echo "Suppress enrollment without creating a user." ;;
-    admin)      echo "Create an admin user without suppressing enrollment." ;;
+		admin)      echo "Create an admin user without suppressing enrollment." ;;
 		heal)       echo "Re-apply suppression after macOS updates." ;;
 		persist)    echo "Install auto-heal LaunchDaemon." ;;
 		unpersist)  echo "Remove auto-heal LaunchDaemon." ;;
@@ -2857,6 +2887,7 @@ show_cmd_help() {
 		dualboot)   echo "Target an external macOS install." ;;
 		status)     echo "Show MDM enrollment status (Recovery only)." ;;
 		check)      echo "Pre-format / pre-upgrade safety report." ;;
+		probe)      echo "Fingerprint macOS version + enrollment; read-only." ;;
 		history)    echo "Show event log from monitor/heal runs." ;;
 		history-clear) echo "Clear event log." ;;
 		monitor)    echo "Start background MDM monitor (5 min interval)." ;;
@@ -2899,7 +2930,7 @@ Bypass / suppress / monitor MDM enrollment on macOS.
   Core:
     bypass          Full MDM bypass from Recovery (creates admin user)
     suppress        Silence enrollment, no user created
-    admin           Create a local admin user without suppressing enrollment
+    admin           Create an admin user without suppressing enrollment
     heal            Check + re-apply suppression after macOS updates
 
   Persistence:
@@ -2936,6 +2967,7 @@ Bypass / suppress / monitor MDM enrollment on macOS.
     predict         Look up serial number enrollment
     telemetry       Manage anonymous usage stats (opt-in)
   Diagnostics:
+    probe           Fingerprint macOS version + MDM mechanism (read-only)
     doctor          Run pre-flight checks on this environment
     report          Generate a full markdown status report
     history         Show event log from monitor/heal runs
@@ -3006,6 +3038,7 @@ cmd_bypass() {
 		header "Full MDM Bypass"
 		local data_mount
 		data_mount=$(resolve_data_volume)
+		probe_gate "$data_mount" || return 1
 		full_bypass_mode "$data_mount"
 	else
 		error_exit "Full bypass must run from Recovery mode."
@@ -3020,7 +3053,15 @@ cmd_suppress() {
 	header "Suppress Enrollment"
 	local data_mount
 	data_mount=$(resolve_data_volume)
+	probe_gate "$data_mount" || return 1
 	suppress_only_mode "$data_mount"
+}
+
+cmd_backup() {
+	header "Backup"
+	local data_mount
+	data_mount=$(resolve_data_volume)
+	backup_state "$data_mount"
 }
 
 cmd_admin() {
@@ -3035,13 +3076,6 @@ cmd_admin() {
 	local data_mount
 	data_mount=$(resolve_data_volume)
 	admin_only_mode "$data_mount"
-}
-
-cmd_backup() {
-	header "Backup"
-	local data_mount
-	data_mount=$(resolve_data_volume)
-	backup_state "$data_mount"
 }
 
 cmd_restore() {
@@ -3280,7 +3314,7 @@ cmd_interactive_recovery() {
 	local options=(
 		"Full bypass (create admin + suppress MDM)"
 		"Suppress enrollment only"
-    "Create local admin user only"
+		"Create local admin user only"
 		"Auto-heal"
 		"Install pf firewall"
 		"Remove pf firewall"
@@ -3303,9 +3337,9 @@ cmd_interactive_recovery() {
 			"Suppress enrollment only")
 				suppress_only_mode "$data_mount"
 				;;
-      "Create local admin user only")
-        admin_only_mode "$data_mount"
-        ;;
+			"Create local admin user only")
+				admin_only_mode "$data_mount"
+				;;
 			"Auto-heal")
 				heal_suppress "$data_mount"
 				;;
@@ -3423,7 +3457,7 @@ main() {
 	case "${1:-}" in
 		bypass|by)       cmd_bypass ;;
 		suppress|sv)     cmd_suppress ;;
-    admin|adm)        cmd_admin ;;
+		admin|adm)	      cmd_admin ;;
 		heal)             cmd_heal ;;
 		persist)          cmd_persist ;;
 		unpersist)        cmd_unpersist ;;
@@ -3437,6 +3471,7 @@ main() {
 		dualboot)         cmd_dualboot ;;
 		status|st|ls)     cmd_status ;;
 		check)            cmd_check ;;
+		probe)            cmd_probe "${2:-}" "${3:-}" ;;
 		history)          cmd_history ;;
 		history-clear)    cmd_history_clear ;;
 		test|dry-run)     cmd_test "$@" ;;

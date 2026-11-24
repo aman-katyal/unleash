@@ -19,8 +19,9 @@ run_preformat_check() {
   if command -v curl &>/dev/null; then
     local enroll_check
     enroll_check=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-      "https://deviceenrollment.apple.com/" 2>/dev/null || echo "000")
-    if [ "$enroll_check" = "000" ] || [ "$enroll_check" = "200" ]; then
+      "https://deviceenrollment.apple.com/" 2>/dev/null) || true
+    enroll_check="${enroll_check:-000}"
+    if [ "$enroll_check" = "200" ]; then
       echo -e "  ${YEL}deviceenrollment.apple.com reachable${NC}"
     else
       echo -e "  ${GRN}deviceenrollment.apple.com blocked (code $enroll_check)${NC}"
@@ -33,7 +34,7 @@ run_preformat_check() {
   if command -v profiles &>/dev/null; then
     local enroll_state
     enroll_state=$(sudo profiles status -type enrollment 2>/dev/null || true)
-    if echo "$enroll_state" | grep -qi "enrolled"; then
+    if echo "$enroll_state" | grep -qi "Yes"; then
       echo -e "  ${RED}Device is enrolled in MDM${NC}"
       clean=false
     else
@@ -44,7 +45,7 @@ run_preformat_check() {
   step "Checking installed profiles..."
   if command -v profiles &>/dev/null; then
     local profile_count
-    profile_count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+    profile_count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
     profile_count="${profile_count:-0}"
     if [ "$profile_count" -gt 0 ]; then
       echo -e "  ${YEL}$profile_count profile(s) installed${NC}"
@@ -56,7 +57,8 @@ run_preformat_check() {
 
   step "Checking pf firewall status..."
   if command -v pfctl &>/dev/null; then
-    if pfctl -a "com.unleash/mdm" -s rules 2>/dev/null | grep -q "block"; then
+    if pfctl -a "com.unleash/mdm" -s rules 2>/dev/null | grep -q "block" \
+      || pfctl -a "com.unleash.selective" -s rules 2>/dev/null | grep -q "block"; then
       echo -e "  ${GRN}Unleash pf firewall active${NC}"
     else
       echo -e "  ${YEL}No Unleash pf firewall rules${NC}"
@@ -102,7 +104,10 @@ check_upgrade_safety() {
     issues=$((issues + 1))
   fi
 
-  if command -v pfctl &>/dev/null && pfctl -a "com.unleash/mdm" -s rules 2>/dev/null | grep -q "block"; then
+  if command -v pfctl &>/dev/null && {
+    pfctl -a "com.unleash/mdm" -s rules 2>/dev/null | grep -q "block" \
+      || pfctl -a "com.unleash.selective" -s rules 2>/dev/null | grep -q "block"
+  }; then
     echo -e "  ${GRN}pf firewall active — survives upgrade${NC}"
   else
     echo -e "  ${YEL}No pf firewall — upgrade may restore MDM connectivity${NC}"

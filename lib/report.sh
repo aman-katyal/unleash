@@ -30,11 +30,11 @@ generate_report() {
   step "Installed Profiles"
   if command -v profiles &>/dev/null; then
     local count
-    count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+    count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
     count="${count:-0}"
     if [ "$count" -gt 0 ]; then
       echo "  $count profile(s) installed"
-      sudo profiles -C -output stdout-xml 2>/dev/null | grep -A1 "ProfileDisplayName" | grep "<string>" \
+      sudo profiles -C -o stdout-xml 2>/dev/null | grep -A1 "ProfileDisplayName" | grep "<string>" \
         | sed 's/.*<string>\(.*\)<\/string>.*/    - \1/'
     else
       echo "  No profiles installed"
@@ -119,7 +119,7 @@ generate_report_json() {
 
   local profile_count=0
   if command -v profiles &>/dev/null; then
-    profile_count=$(sudo profiles -C -output stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
+    profile_count=$(sudo profiles -C -o stdout-xml 2>/dev/null | grep -c "ProfileDisplayName" || true)
     profile_count="${profile_count:-0}"
   fi
   report="${report}  \"installed_profiles\": $profile_count,\n"

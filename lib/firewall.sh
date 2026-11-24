@@ -33,7 +33,7 @@ install_pf_mdm_block() {
 	local anchor_file="${anchor_dir}/${FIREWALL_ANCHOR}"
 
 	pf_backup_anchor "$root"
-	mkdir -p "$anchor_dir"
+	mkdir -p "$(dirname "$anchor_file")"
 
 	cat > "$anchor_file" << 'ANCHOR'
 # Unleash MDM block — Apple MDM infrastructure IP ranges
@@ -50,7 +50,7 @@ ANCHOR
 	local load_line="load anchor \"${FIREWALL_ANCHOR}\" from \"${anchor_file}\""
 
 	if [ -f "$pf_conf" ]; then
-		if grep -q "com.unleash" "$pf_conf" 2>/dev/null; then
+		if grep -q "$FIREWALL_ANCHOR" "$pf_conf" 2>/dev/null; then
 			info "pf.conf already has Unleash anchor"
 		else
 			printf '\n%s\n%s\n%s\n' "# Added by unleash — MDM block" "$anchor_line" "$load_line" >> "$pf_conf"
@@ -78,7 +78,8 @@ ANCHOR
 
 	step "Loading pf rules..."
 	if command -v pfctl &>/dev/null; then
-		if pfctl -e -f "$pf_conf" 2>/dev/null; then
+		if pfctl -f "$pf_conf" 2>/dev/null; then
+			pfctl -e 2>/dev/null || true
 			success "pf enabled and rules loaded"
 		else
 			warn "pfctl failed — try: sudo pfctl -e -f $pf_conf"
@@ -110,7 +111,7 @@ remove_pf_mdm_block() {
 		local tmp_conf
 		tmp_conf=$(mktemp "${pf_conf}.XXXXXX") || return 1
 		if ! cp -p "$pf_conf" "$tmp_conf" \
-			|| ! sed '/# Added by unleash/d; /com\.unleash/d' "$pf_conf" > "$tmp_conf" \
+			|| ! sed '/# Added by unleash — MDM block/d; /com\.unleash\/mdm/d' "$pf_conf" > "$tmp_conf" \
 			|| ! mv "$tmp_conf" "$pf_conf"; then
 			rm -f "$tmp_conf"
 			return 1

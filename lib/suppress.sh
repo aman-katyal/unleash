@@ -96,9 +96,12 @@ suppress_enrollment() {
 	      "$cfg/.cloudConfigTimerCheck" \
 	      "$cfg/.cloudConfigProfileInstalled" \
 	      "$cfg/com.apple.mdm.depnag.plist" \
-	      "$cfg/com.apple.mdm.prelogin.plist" 2>/dev/null
-	touch "$cfg/.cloudConfigRecordNotFound"
-	success "Cached record cleared; bypass markers set"
+	      "$cfg/com.apple.mdm.prelogin.plist" 2>/dev/null || true
+	if [ -f "$cfg/.cloudConfigRecordNotFound" ] || touch "$cfg/.cloudConfigRecordNotFound" 2>/dev/null; then
+		success "Cached record cleared; bypass markers set"
+	else
+		warn "Could not write .cloudConfigRecordNotFound (SIP-protected in live macOS)"
+	fi
 
 	step "Cleaning user-level MDM artifacts..."
 	local home
@@ -130,7 +133,8 @@ suppress_enrollment() {
 		com.apple.mdmclient.daemon.runatboot \
 		com.apple.activationd; do
 		$PB -c "Add :$label bool true" "$ldp" 2>/dev/null \
-			|| $PB -c "Set :$label true" "$ldp" 2>/dev/null
+			|| $PB -c "Set :$label true" "$ldp" 2>/dev/null \
+			|| warn "Could not disable $label (SIP-protected in live macOS)"
 		info "disabled $label"
 	done
 	success "Enrollment daemons disabled (4 overrides)"

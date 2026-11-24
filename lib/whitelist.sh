@@ -53,7 +53,8 @@ EOF
   fi
 
   if command -v pfctl &>/dev/null; then
-    if pfctl -e -f "$pf_conf" 2>/dev/null; then
+    if pfctl -f "$pf_conf" 2>/dev/null; then
+      pfctl -e 2>/dev/null || true
       success "pf rules loaded (iCloud should work)"
     else
       warn "pfctl failed"
